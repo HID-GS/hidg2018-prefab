@@ -1,0 +1,15 @@
+<?php
+
+/**
+ * @file
+ */
+
+use Drupal\encrypt\EncryptionProfileInterface;
+
+/**
+ * Implements hook_encryption_profile_predelete()
+ * If the assigned Encryption profile gets deleted, reset encryption settings.
+ */
+function salesforce_encryption_profile_predelete(EncryptionProfileInterface $entity) {
+  \Drupal::service('salesforce.client')->hookEncryptionProfileDelete($entity);
+}

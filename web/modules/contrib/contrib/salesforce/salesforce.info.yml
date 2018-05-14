@@ -1,0 +1,6 @@
+name: Salesforce Integration
+type: module
+description: Modules to integrate Drupal and Salesforce
+package: Salesforce
+core: 8.x
+configure: salesforce.config_index

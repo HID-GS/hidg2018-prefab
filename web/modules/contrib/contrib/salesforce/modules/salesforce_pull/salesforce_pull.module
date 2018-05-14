@@ -1,0 +1,17 @@
+<?php
+
+/**
+ * @file
+ * Pull updates from Salesforce when a Salesforce object is updated.
+ */
+
+/**
+ * Implements hook_cron().
+ */
+function salesforce_pull_cron() {
+  $sfapi = \Drupal::service('salesforce.client');
+  if ($sfapi->isAuthorized()) {
+    \Drupal::service('salesforce_pull.queue_handler')->getUpdatedRecords();
+    \Drupal::service('salesforce_pull.delete_handler')->processDeletedRecords();
+  }
+}

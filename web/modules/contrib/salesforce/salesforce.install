@@ -1,0 +1,199 @@
+<?php
+
+/**
+ * @file
+ */
+
+use Drupal\Component\Serialization\Json;
+
+/**
+ * Purge Salesforce module state variables.
+ */
+function salesforce_uninstall() {
+  $delete = [
+    'salesforce.instance_url',
+    'salesforce.access_token',
+    'salesforce.refresh_token',
+    'salesforce.identity',
+    'salesforce.last_requirements_check',
+    'salesforce.usage',
+    'salesforce.tls_status',
+  ];
+  \Drupal::state()->deleteMultiple($delete);
+}
+
+/**
+ *
+ */
+function salesforce_requirements($phase) {
+  if ($phase != 'runtime') {
+    return [];
+  }
+
+  // Check requirements once per 24 hours.
+  $last = \Drupal::state()->get('salesforce.last_requirements_check', 0);
+
+  $requirements['salesforce_usage'] = salesforce_get_usage_requirements();
+
+  $requirements['salesforce_tls'] = salesforce_get_tls_requirements();
+  if ($last < REQUEST_TIME - (60 * 60 * 24) || empty($requirements['salesforce_tls'])) {
+    salesforce_fetch_new_tls();
+    $requirements['salesforce_tls'] = salesforce_get_tls_requirements();
+  }
+
+  return $requirements;
+}
+
+/**
+ *
+ */
+function salesforce_fetch_new_tls() {
+  $response = FALSE;
+  try {
+    // Ping the howsmyssl web service to check TLS version support for this client.
+    \Drupal::state()->set('salesforce.last_requirements_check', REQUEST_TIME);
+    $raw_response = \Drupal::service('http_client')->get('https://www.howsmyssl.com/a/check', ['json' => TRUE, 'timeout' => 5]);
+    $body = $raw_response->getBody();
+    if (!empty($body)) {
+      $body = $body->getContents();
+      if (!empty($body)) {
+        $response = Json::decode($body);
+      }
+    }
+  }
+  catch (Exception $e) {
+    // Noop.
+  }
+  \Drupal::state()->set('salesforce.tls_status', $response);
+  return $response;
+}
+
+/**
+ *
+ */
+function salesforce_get_tls_requirements() {
+  $response = \Drupal::state()->get('salesforce.tls_status', FALSE);
+  $last = \Drupal::state()->get('salesforce.last_requirements_check', 0);
+  $last = \Drupal::service('date.formatter')->format($last);
+  $requirements = [
+    'title' => t('Salesforce TLS'),
+    'value' => t('TLS 1.1+ Support last checked %time', ['%time' => $last]),
+  ];
+  // If we didn't get a good response, throw a warning.
+  if (empty($response) || empty($response['tls_version'])) {
+    $requirements += [
+      'severity' => REQUIREMENT_WARNING,
+      'description' => t('Drupal failed to connect to https://www.howsmyssl.com/a/check service to check TLS 1.1+ support for this client. Please ensure your OpenSSL client supports TLS 1.1+ before using Salesforce module.'),
+    ];
+  }
+  else {
+    // If we got a good response, and this client doesn't support TLS1.1+, throw an error.
+    switch ($response['tls_version']) {
+      case 'TLS 1.1':
+      case 'TLS 1.2':
+      case 'TLS 1.3':
+        $requirements += [
+          'severity' => REQUIREMENT_OK,
+          'description' => t('OK: %version', ['%version' => $response['tls_version']]),
+        ];
+        break;
+
+      default:
+        $requirements += [
+          'severity' => REQUIREMENT_ERROR,
+          'description' => t('Unsupported: %version -- Salesforce API requires TLS 1.1+. Please upgrade your OpenSSL version before using Salesforce module.', ['%version' => $response['tls_version']]),
+        ];
+        break;
+    }
+  }
+  return $requirements;
+}
+
+/**
+ *
+ */
+function salesforce_get_usage_requirements() {
+  $requirements = [
+    'title' => t('Salesforce usage'),
+    'value' => t('API Limit Info'),
+  ];
+
+  $usage = FALSE;
+  try {
+    $usage = \Drupal::service('salesforce.client')->getApiUsage();
+  }
+  catch (Exception $e) {
+    // Noop.
+  }
+
+  if (empty($usage)) {
+    $requirements += [
+      'severity' => REQUIREMENT_OK,
+      'description' => t('Usage information unavailable'),
+    ];
+  }
+  else {
+    $usage = str_replace('api-usage=', '', $usage);
+
+    list($usage, $limit) = explode('/', $usage, 2);
+    $pct = 'N/A';
+    if ($limit > 0) {
+      $pct = ($usage / $limit) * 100.0;
+    }
+    $args = [
+      '%usage' => number_format($usage),
+      '%limit' => number_format($limit),
+      '%pct' => number_format($pct, 2) . '%',
+    ];
+    $requirements += [
+      'description' => t('Usage: %usage requests of %limit limit (%pct) in the past 24 hours.', $args),
+      'severity' => $pct >= 100 ? REQUIREMENT_WARNING : REQUIREMENT_OK,
+    ];
+  }
+
+  return $requirements;
+}
+
+/**
+ * Install new "Use Latest API version" boolean; defaults to TRUE.
+ */
+function salesforce_update_8001() {
+  $settings = \Drupal::configFactory()->getEditable('salesforce.settings');
+  $settings->set('use_latest', TRUE);
+  $settings->save();
+}
+
+/**
+ * Install new "Limit revisions" setting; defaults to 10
+ */
+function salesforce_update_8002() {
+  $settings = \Drupal::configFactory()->getEditable('salesforce.settings');
+  $settings->set('limit_mapped_object_revisions', 10);
+  $settings->save();
+}
+
+/**
+ * Move API credentials from state to config.
+ */
+function salesforce_update_8003() {
+  // Populate config from state.
+  $config = \Drupal::configFactory()->getEditable('salesforce.settings');
+  if ($consumer_key = \Drupal::state()->get('salesforce.consumer_key', FALSE)) {
+    $config->set('consumer_key', $consumer_key);
+  }
+  if ($consumer_secret = \Drupal::state()->get('salesforce.consumer_secret', FALSE)) {
+    $config->set('consumer_secret', $consumer_secret);
+  }
+  if ($login_url = \Drupal::state()->get('salesforce.login_url', FALSE)) {
+    $config->set('login_url', $login_url);
+  }
+  $config->save();
+
+  // Delete deprecated state variables.
+  $delete = [
+    'salesforce.consumer_key',
+    'salesforce.consumer_secret',
+    'salesforce.login_url',
+  ];
+  \Drupal::state()->deleteMultiple($delete);
+}
